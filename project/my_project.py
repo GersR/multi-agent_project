@@ -637,7 +637,7 @@ def check_inventory(as_of_date: str) -> str:
     low_stock_items = []
     
     for _, item in inventory_ref.iterrows():
-        name = item["item_name"]
+        name = item["item_name"].replace("paper", "")
         current = inventory.get(name, 0)
         minimum = item["min_stock_level"]
         status = "LOW" if current <= minimum else "OK"
@@ -659,19 +659,29 @@ def check_item_stock(item_name: str, as_of_date: str) -> str:
         item_name: The name of the item to check stock for.
         as_of_date: ISO-formatted date string (YYYY-MM-DD) to check stock as of.
     """
-    stock_df = get_stock_level(item_name, as_of_date)
-    current_stock = int(stock_df["current_stock"].iloc[0])
+    # Load all inventory items for fuzzy matching
+    inv_ref = pd.read_sql("SELECT * FROM inventory", db_engine)
     
-    # Get min_stock_level from inventory table
-    inv_ref = pd.read_sql(
-        "SELECT * FROM inventory WHERE item_name = :name",
-        db_engine, params={"name": item_name}
-    )
+    search_lower = item_name.lower().replace("paper","")
+    search_words = set(search_lower.split())
     
-    if inv_ref.empty:
-        return f"'{item_name}' is not currently in our inventory catalog."
-    
-    min_level = int(inv_ref["min_stock_level"].iloc[0])
+    # Find matching items using bidirectional + word-overlap matching
+    matches = []
+    for _, row in inv_ref.iterrows():
+        catalog_lower = row["item_name"].lower().replace("paper","")
+        catalog_words = set(catalog_lower.split())
+
+        if (catalog_lower in search_lower or 
+            search_lower in catalog_lower or
+            len(catalog_words & search_words) >= max(1, len(catalog_words) * 0.5)):
+            matches.append(row)
+        
+    if not matches:
+        return f"No catalog items matching '{item_name}'. Item may need to be sourced externally."
+
+    match=matches[0]
+    min_level = int(match["min_stock_level"])
+    current_stock = match["current_stock"]
     needs_restock = current_stock <= min_level
     
     return (
@@ -690,45 +700,42 @@ def restock_item(item_name: str, quantity: int, order_date: str) -> str:
         quantity: Number of units to order.
         order_date: ISO-formatted date string (YYYY-MM-DD) for the order.
     """
-    # Look up unit price
-    inv_ref = pd.read_sql(
-        "SELECT * FROM inventory WHERE item_name = :name",
-        db_engine, params={"name": item_name}
-    )
+    # Load all inventory items for fuzzy matching
+    inv_ref = pd.read_sql("SELECT * FROM inventory", db_engine)
     
-    if inv_ref.empty:
-        return f"ERROR: '{item_name}' not found in inventory catalog."
+    search_lower = item_name.lower().replace("paper","")
+    search_words = set(search_lower.split())
     
-    unit_price = float(inv_ref["unit_price"].iloc[0])
-    total_cost = quantity * unit_price
+    # Find matching items using bidirectional + word-overlap matching
+    matches = []
+    for _, row in inv_ref.iterrows():
+        catalog_lower = row["item_name"].lower()
+        catalog_words = set(catalog_lower.split())
+        
+        if (catalog_lower in search_lower or 
+            search_lower in catalog_lower or
+            len(catalog_words & search_words) >= max(1, len(catalog_words) * 0.5)):
+            matches.append(row)
     
-    # Check cash availability
-    cash = get_cash_balance(order_date)
-    if total_cost > cash:
-        return (
-            f"ERROR: Insufficient funds. "
-            f"Cost: ${total_cost:.2f}, Available: ${cash:.2f}"
+    if not matches:
+        return f"'{item_name}' is not currently in our inventory catalog."
+    
+    # Report stock for all matching items
+    lines = [f"Stock check for '{item_name}' (found {len(matches)} match(es)):\n"]
+    for match in matches:
+        stock_df = get_stock_level(match["item_name"], as_of_date)
+        current_stock = int(stock_df["current_stock"].iloc[0])
+        min_level = int(match["min_stock_level"])
+        needs_restock = current_stock <= min_level
+        
+        lines.append(
+            f"  Item: {match['item_name']}\n"
+            f"  Current Stock: {current_stock}\n"
+            f"  Minimum Level: {min_level}\n"
+            f"  Needs Restock: {'YES' if needs_restock else 'No'}\n"
         )
     
-    # Record the stock order
-    txn_id = create_transaction(
-        item_name=item_name,
-        transaction_type="stock_orders",
-        quantity=quantity,
-        price=total_cost,
-        date=order_date
-    )
-    
-    # Get estimated delivery
-    delivery_date = get_supplier_delivery_date(order_date, quantity)
-    
-    return (
-        f"Restock confirmed (Txn #{txn_id}):\n"
-        f"Item: {item_name}\n"
-        f"Quantity: {quantity} units\n"
-        f"Cost: ${total_cost:.2f}\n"
-        f"Estimated Delivery: {delivery_date}"
-    )
+    return "\n".join(lines)
 
 #############################
 # Tools for quoting agent   #
@@ -767,35 +774,32 @@ def get_catalog_pricing(item_name: str = None) -> str:
     Args:
         item_name: Item name or partial name to search for. Leave empty for full catalog.
     """
-    if item_name:
-        search_lower = item_name.lower()
-        search_words = set(search_lower.split())
+    # Load all inventory items for fuzzy matching
+    inv_ref = pd.read_sql("SELECT * FROM inventory", db_engine)
+    
+    search_lower = item_name.lower().replace("paper","")
+    search_words = set(search_lower.split())
+    
+    # Find matching items using bidirectional + word-overlap matching
+    matches = []
+    for _, row in inv_ref.iterrows():
+        catalog_lower = row["item_name"].lower().replace("paper","")
+        catalog_words = set(catalog_lower.split())
+
+        if (catalog_lower in search_lower or 
+            search_lower in catalog_lower or
+            len(catalog_words & search_words) >= max(1, len(catalog_words) * 0.5)):
+            matches.append(row)
         
-        matches = []
-        for item in paper_supplies:
-            catalog_lower = item["item_name"].lower()
-            catalog_words = set(catalog_lower.split())
-            
-            # Match if:
-            # 1. Search term contains catalog name ("a4 glossy paper" contains "a4 paper"? No, but...)
-            # 2. Catalog name is a substring of search term
-            # 3. Search term is a substring of catalog name
-            # 4. Significant word overlap (at least half the catalog words appear in search)
-            if (catalog_lower in search_lower or 
-                search_lower in catalog_lower or
-                len(catalog_words & search_words) >= max(1, len(catalog_words) * 0.5)):
-                matches.append(item)
-        if not matches:
-            return f"No catalog items matching '{item_name}'. Item may need to be sourced externally."
-        lines = [f"Catalog matches for '{item_name}':"]
-        for m in matches:
-            lines.append(f"  - {m['item_name']} ({m['category']}): ${m['unit_price']:.2f}/unit")
-        return "\n".join(lines)
-    else:
-        lines = ["Full catalog pricing:"]
-        for item in paper_supplies:
-            lines.append(f"  - {item['item_name']} ({item['category']}): ${item['unit_price']:.2f}/unit")
-        return "\n".join(lines)
+    if not matches:
+        return f"No catalog items matching '{item_name}'. Item may need to be sourced externally."
+    
+    lines = [f"Catalog matches for '{item_name}':"]
+    
+    for m in matches:
+        lines.append(f"Item name: {m['item_name']}. Unit Price: ${m['unit_price']:.2f}/unit")
+    
+    return "\n".join(lines)
 
 @tool
 def calculate_quote(items_json: str, as_of_date: str, markup: float = 0.35) -> str:
@@ -814,26 +818,36 @@ def calculate_quote(items_json: str, as_of_date: str, markup: float = 0.35) -> s
     subtotal = 0.0
     availability_issues = []
     
+    # Load all inventory items
+    inv_ref = pd.read_sql("SELECT * FROM inventory", db_engine)
+
+    # Find matching items using bidirectional + word-overlap matching
     for req in items_requested:
         name = req["item_name"]
         qty = req["quantity"]
+        search_lower = name.lower().replace("paper","")
+        search_words = set(search_lower.split())
+        matches = []
         
-        # Find unit price from catalog
-        catalog_match = next(
-            (item for item in paper_supplies if item["item_name"].lower() == name.lower()),
-            None
-        )
+        for _, row in inv_ref.iterrows():
+            catalog_lower = row["item_name"].lower().replace("paper","")
+            catalog_words = set(catalog_lower.split())
+
+            if (catalog_lower in search_lower or 
+                search_lower in catalog_lower or
+                len(catalog_words & search_words) >= max(1, len(catalog_words) * 0.5)):
+                matches.append(row)
         
-        if not catalog_match:
+        if not matches:
             availability_issues.append(f"'{name}' not found in catalog")
             continue
-        
-        unit_price = catalog_match["unit_price"]
+        match=matches[0]
+        unit_price = match["unit_price"]
         line_cost = qty * unit_price
         subtotal += line_cost
         
         # Check stock availability
-        current_stock = inventory.get(name, 0)
+        current_stock = match["current_stock"]
         stock_status = "In Stock" if current_stock >= qty else f"LOW (only {current_stock} available, need restock)"
         
         if current_stock < qty:
@@ -876,19 +890,32 @@ def record_sale(item_name: str, quantity: int, sale_date: str) -> str:
         quantity: Number of units sold.
         sale_date: ISO-formatted date string (YYYY-MM-DD) for the sale.
     """
+    # Load all inventory items for fuzzy matching
+    inv_ref = pd.read_sql("SELECT * FROM inventory", db_engine)
     # Verify item exists in catalog
-    catalog_match = next(
-        (item for item in paper_supplies if item["item_name"].lower() == item_name.lower()),
-        None
-    )
-    if not catalog_match:
-        return f"ERROR: '{item_name}' not found in product catalog."
+    search_lower = item_name.lower()
+    search_words = set(search_lower.split())
+    
+    # Find matching items using bidirectional + word-overlap matching
+    matches = []
+    for _, row in inv_ref.iterrows():
+        catalog_lower = row["item_name"].lower().replace("paper", "")
+        catalog_words = set(catalog_lower.split())
+        
+        if (catalog_lower in search_lower or 
+            search_lower in catalog_lower or
+            len(catalog_words & search_words) >= max(1, len(catalog_words) * 0.5)):
+            matches.append(row)
 
+    if not matches:
+        return f"ERROR: '{item_name}' not found in product catalog."
+    
+    match=matches[0]
+    catalog_mach = paper_supplies[matches[0]]
     unit_price = catalog_match["unit_price"]
 
     # Check stock availability
-    stock_df = get_stock_level(item_name, sale_date)
-    current_stock = int(stock_df["current_stock"].iloc[0])
+    current_stock = int(matches["current_stock"].iloc[0])
 
     if current_stock < quantity:
         return (
@@ -1088,43 +1115,6 @@ def handle_order(classification: Dict, request_date: str, original_request: str)
     return order_agent.run(task)
 
 # Set up your agents and create an orchestration agent that will manage them.
-
-##########################
-# AGENT SYSTEM PROMPTS   #
-##########################
-
-INVENTORY_AGENT_PROMPT = """You are the Inventory Agent for Munder Difflin Paper Company.
-Your responsibilities:
-- Check current stock levels for items
-- Identify items that need restocking (below min_stock_level)
-- Execute restocking orders when needed
-
-When restocking, order enough to bring stock to 2x the minimum level.
-Always report what actions you took and the current state after.
-Respond in plain text with clear summaries."""
-
-QUOTING_AGENT_PROMPT = """You are the Quoting Agent for Munder Difflin Paper Company.
-Your responsibilities:
-- Interpret customer quote requests to identify items and quantities
-- Search historical quotes for similar orders to inform pricing
-- Calculate quotes using catalog pricing with a 35% markup
-- Flag availability issues that require restocking
-
-When interpreting vague requests, match to the closest catalog items.
-Always provide a clear breakdown of the quote with line items and totals.
-Respond in plain text with a professional quote format."""
-
-ORDER_AGENT_PROMPT = """You are the Order Fulfillment Agent for Munder Difflin Paper Company.
-Your responsibilities:
-- Process confirmed orders by recording sales
-- Validate stock availability before fulfilling
-- Check cash balance sufficiency
-- Calculate delivery dates
-- If stock is insufficient, recommend restocking before fulfillment
-
-Always confirm what was fulfilled and report any issues.
-Respond in plain text with order confirmation details."""
-
 ##########################
 # CREATE SUB-AGENTS      #
 ##########################
@@ -1134,10 +1124,17 @@ inventory_agent = ToolCallingAgent(
     model=model,
     name="inventory_agent",
     description=(
-        "Handles all inventory-related tasks: checking stock levels, "
-        "identifying items below minimum stock, and placing restock orders. "
-        "Use this agent when the request is about stock availability, "
-        "inventory status, or restocking needs."
+        "Manages stock levels and restocking for the paper warehouse. "
+        "Use this agent to: check current inventory levels for all or specific items, "
+        "identify items below their minimum stock threshold, and place restock orders "
+        "to bring stock up to 2x the minimum level. "
+        "Call this agent BEFORE fulfilling orders if availability is uncertain, "
+        "or AFTER a failed order due to insufficient stock. "
+        "Typical triggers: 'check stock', 'do we have enough', 'restock', "
+        "'inventory status', 'what's available', or when another agent reports "
+        "'insufficient stock' or 'LOW' availability. "
+        "Do NOT use for pricing, quotes, or recording sales — those belong to "
+        "quoting_agent and order_agent respectively."
     ),
     max_steps=10,
 )
@@ -1147,10 +1144,15 @@ quoting_agent = ToolCallingAgent(
     model=model,
     name="quoting_agent",
     description=(
-        "Handles customer quote requests: searches historical quotes for "
-        "similar orders, looks up catalog pricing, and calculates professional "
-        "quotes with markup. Use this agent when a customer asks for pricing, "
-        "cost estimates, or a formal quote for paper products."
+        "Creates price quotes and cost estimates for customer paper supply requests. "
+        "Use this agent when a customer describes what supplies they need and you must "
+        "determine pricing — even if they say 'I would like to request' or 'I need'. "
+        "This agent interprets requests to identify items, matches them to catalog products "
+        "using fuzzy matching, searches historical quotes for similar orders, and calculates "
+        "a professional quote with 35% markup. It also flags stock availability issues. "
+        "Do NOT use this agent to actually fulfill or confirm orders — use order_agent for that. "
+        "Typical triggers: 'quote', 'price', 'cost', 'estimate', 'request supplies', "
+        " or any request listing items with quantities that needs pricing."
     ),
     max_steps=10,
 )
@@ -1160,10 +1162,13 @@ order_agent = ToolCallingAgent(
     model=model,
     name="order_agent",
     description=(
-        "Handles confirmed order fulfillment: validates stock, records sales "
-        "transactions, checks cash balance, and generates financial reports. "
-        "Use this agent when a customer confirms a purchase or when a "
-        "financial report is needed."
+        "Processes confirmed purchase orders and manages finances. "
+        "Use this agent when a customer says they want to 'place an order', "
+        "'order', 'purchase', or 'buy' items — these are confirmed sales, not quotes. "
+        "Capabilities: validate stock availability before selling, record individual "
+        "or bulk sales transactions, check cash balance, and generate financial reports. "
+        "If stock is insufficient for an item, it reports the shortage. "
+        "Do NOT use this agent for price inquiries or estimates — use quoting_agent instead."
     ),
     max_steps=10,
 )
@@ -1171,29 +1176,27 @@ order_agent = ToolCallingAgent(
 ##################
 # ORCHESTRATOR   #
 ##################
-
-MANAGER_PROMPT = """You are the Manager Agent for Munder Difflin Paper Company.
-You coordinate a team of specialized agents to handle customer requests.
-
-Your team:
-- inventory_agent: checks stock levels and restocks items
-- quoting_agent: creates price quotes for customer inquiries  
-- order_agent: fulfills confirmed orders and tracks finances
-
-For each incoming request:
-1. Determine which agent(s) should handle it
-2. Delegate with a clear, specific task description
-3. Return the agent's response to the customer
-
-If a request spans multiple concerns (e.g., "quote me and also check if you have stock"), 
-call the relevant agents in sequence and combine their responses.
-
-Always include the request date in your delegation so agents can check time-sensitive data."""
-
 manager_agent = CodeAgent(
     tools=[],  # No direct tools - delegates everything to sub-agents
     model=model,
     managed_agents=[inventory_agent, quoting_agent, order_agent],
+    description=("""You are the Manager Agent for Munder Difflin Paper Company.
+        You coordinate a team of specialized agents to handle customer requests.
+
+        Your team:
+        - inventory_agent: checks stock levels and restocks items
+        - quoting_agent: creates price quotes for customer inquiries  
+        - order_agent: fulfills confirmed orders and tracks finances
+
+        For each incoming request:
+        1. Determine which agent(s) should handle it
+        2. Delegate with a clear, specific task description
+        3. Return the agent's response to the customer
+
+        If a request spans multiple concerns (e.g., "quote me and also check if you have stock"), 
+        call the relevant agents in sequence and combine their responses.
+
+        Always include the request date in your delegation so agents can check time-sensitive data."""),
     max_steps=12,
     verbosity_level=2,  # Set to 0 in production to suppress logs
 )

@@ -28,19 +28,14 @@ ToolCallingAgents:
 * **Reliability**: Transactions are persisted in an SQLite database with full audit trails; 
   stock and cash balances are validated before any purchase or sale is committed.
 
-### Technology Stack
-
-The system is powered by OpenAI's GPT-4.1-mini model, SQLAlchemy/SQLite for persistent 
-state, and pandas for data manipulation. The `smolagents` framework provides tool-decorated 
-functions and native LLM integration, enabling each agent to reason over its toolset 
-autonomously while the Manager coordinates multi-step workflows.
-
 ### Validation
 
 The solution was verified against a set of sample customer requests (`mini_sample.csv`), 
 processing each sequentially while tracking cash balance and inventory value across the 
 full scenario lifecycle. Results are persisted to `test_results.csv` with a final 
 financial health report confirming system integrity.
+
+---
 
 ## System Architecture
 
@@ -62,10 +57,6 @@ capabilities that allow it to:
   sequence of sub-agent calls.
 - **Aggregate responses**: Combine outputs from multiple sub-agents into a coherent, 
   unified response for the end user.
-
-The `CodeAgent` type was chosen for the Manager because it can generate and execute Python 
-code at runtime, providing maximum flexibility when routing logic requires conditional 
-branching or data transformation between agent calls.
 
 #### 2. Inventory Agent (ToolCallingAgent) — Stock Monitoring & Restocking
 
@@ -94,15 +85,6 @@ Its tools include:
 | `get_catalog_price` | Retrieves the base unit price from the product catalog |
 | `calculate_quote` | Computes a final quoted price applying a 35% markup, bulk discounts, and availability checks |
 
-This agent references two data sources:
-- **`quotes.csv`** (loaded into the `quotes` table): Historical quote records with metadata 
-  on past pricing decisions.
-- **`quote_requests.csv`** (loaded into `quote_requests` table): Incoming customer 
-  inquiries used to build and validate quoting logic.
-
-The pricing strategy applies a consistent 35% markup over base cost, with intelligence 
-drawn from historical quote patterns to remain competitive.
-
 #### 4. Order Agent (ToolCallingAgent) — Sales Fulfillment & Financial Reporting
 
 The Order Agent handles the end-to-end processing of confirmed sales. Its tools include:
@@ -119,41 +101,10 @@ Before processing any sale, this agent performs pre-flight checks:
 3. Records the transaction with timestamp and type classification (`sale`)
 
 ---
-
-### B. Technology Stack
-
-| Layer | Technology | Purpose |
-| --- | --- | --- |
-| Agent Framework | `smolagents` | Provides `CodeAgent` and `ToolCallingAgent` abstractions with native tool registration via `@tool` decorators |
-| LLM Backend | OpenAI GPT-4.1-mini | Powers agent reasoning, intent classification, and natural language generation (accessed via OpenAI-compatible proxy) |
-| Database | SQLAlchemy + SQLite | Persistent state management for inventory, transactions, quotes, and quote requests |
-| Data Processing | pandas + NumPy | Inventory generation, CSV ingestion, and data transformation |
-| Configuration | python-dotenv | Secure API key management via `.env` file |
-
-#### Why This Stack?
-
-- **`smolagents`** was selected over `pydantic-ai` and `npcpy` for its lightweight 
-  architecture, minimal boilerplate, and clear distinction between `CodeAgent` (for 
-  orchestration) and `ToolCallingAgent` (for task execution). Tool registration via Python 
-  decorators keeps the implementation clean and readable.
-
-- **GPT-4.1-mini** balances reasoning quality with speed and cost, making it suitable for 
-  high-frequency request processing in a business context.
-
-- **SQLite** provides zero-configuration persistent storage appropriate for a single-user 
-  demonstration system. All four database tables (`inventory`, `transactions`, `quotes`, 
-  `quote_requests`) are initialized via the `init_database()` function with reproducible 
-  seed-based data generation.
-
-- **pandas** bridges the gap between raw CSV files and the SQLite database, handling 
-  schema inference and bulk inserts during initialization.
-
 ## Requirement Fulfillment
 
 This section maps each project requirement to the specific tools, logic, and agent 
-behaviors implemented in `starter.py`.
-
----
+behaviors implemented in `my_project.py`.
 
 ### A. Inventory Management
 
@@ -236,8 +187,8 @@ competitive pricing.
 #### `get_catalog_pricing(item_name)`
 
 Provides authoritative base pricing by:
-1. Performing a fuzzy match against the full `paper_supplies` catalog (46 items)
-2. Matching any item whose name contains the search term (case-insensitive)
+1. Matching against the full `paper_supplies` catalog (46 items)
+2. Matching any item whose name contains the search term or if it is a substring (case-insensitive)
 3. Returning item name, category, and unit price for all matches
 4. If no `item_name` is provided, returning the complete catalog
 
@@ -343,13 +294,7 @@ end-to-end integration test simulating real-world customer interactions against 
 multi-agent system. This function exercises all four agents across diverse request types— 
 inventory checks, quote generation, and order fulfillment—within a single sequential run.
 
----
-
-### Test Data: mini_sample.csv
-
-The test suite ingests customer requests from `mini_sample.csv`, a curated dataset 
-containing simulated inquiries representative of actual business scenarios. Each record 
-includes:
+Each record includes:
 
 - **request**: The natural language customer inquiry (text-only input)
 - **request_date**: The date the request was received (parsed from MM/DD/YY format)
@@ -362,53 +307,6 @@ Before processing begins, the function performs data preparation:
 3. Sorts all requests chronologically by `request_date` to ensure transactions are 
    processed in temporal order—this is critical because inventory levels and cash 
    balances are date-sensitive and cumulative
-
----
-
-### Sequential Processing Model
-
-Requests are processed strictly one at a time in chronological order. For each request, 
-the test harness performs the following cycle:
-
-1. **Pre-request state capture**: Records the current cash balance and inventory value 
-   by calling `generate_financial_report()` with the request's date
-2. **Context logging**: Prints the request number, customer context (job and event), 
-   request date, and current financial state to the console for real-time monitoring
-3. **Request augmentation**: Appends the request date to the customer's original text 
-   (e.g., "Date of request: 2025-03-15") so that all agents use the correct temporal 
-   reference for inventory lookups and transaction recording
-4. **Agent invocation**: Passes the augmented request to the `orchestrator()` function, 
-   which triggers the Manager Agent's classification and delegation logic
-5. **Post-request state update**: Calls `generate_financial_report()` again to capture 
-   the updated cash balance and inventory value after any transactions the agents executed
-6. **Throttling**: Introduces a 1-second delay between requests to avoid overwhelming 
-   the LLM API endpoint with rapid successive calls
-
-This sequential model ensures that each request sees the cumulative effect of all prior 
-requests—a sale processed in request #3 reduces stock available for request #4, and a 
-restock in request #5 increases the balance available for request #6.
-
----
-
-### State Tracking
-
-Two financial metrics are tracked continuously across the entire test run:
-
-**Cash Balance** — Computed after each request as the net of all `sales` revenue minus 
-all `stock_orders` costs recorded in the `transactions` table up to that request's date. 
-This reflects real-time purchasing power and determines whether the system can approve 
-restocking orders or must reject them due to insufficient funds.
-
-**Inventory Value** — Calculated after each request by summing `current_stock × unit_price` 
-for every item in the inventory table. This captures the total asset value held in 
-physical stock and reveals whether the system is maintaining, depleting, or growing its 
-inventory base over time.
-
-Together, these two metrics provide a running view of the company's total asset position 
-(cash + inventory) and make it immediately visible if the system is operating profitably 
-or draining resources.
-
----
 
 ### Results Persistence: test_results.csv
 
@@ -429,49 +327,14 @@ requests triggered state changes (sales, restocks), and verify that agent respon
 are contextually appropriate and factually consistent with the database state.
 
 ---
-
-### Final Financial Report: System Health Check
-
-After all requests have been processed, the test harness generates a comprehensive 
-financial report as of the latest request date. This final report acts as a system 
-health check and includes:
-
-- **Final Cash Balance**: Confirms the company remains solvent after all transactions. 
-  A positive balance indicates the system maintained financial discipline throughout the 
-  run; a negative balance would signal that restocking orders exceeded revenue—a critical 
-  failure condition.
-
-- **Final Inventory Value**: Reveals whether stock levels were maintained, depleted 
-  through sales, or grown through restocking. Combined with cash balance, this shows 
-  whether the system achieved net asset growth or decline.
-
-- **Inventory Breakdown**: Itemized list of every product with its remaining stock 
-  count and per-item valuation, enabling verification that no single item was over-ordered 
-  or completely depleted without replenishment.
-
-- **Top 5 Selling Products**: Ranked by total revenue, this validates that the Order Agent 
-  successfully processed sales transactions and that the system correctly identified and 
-  fulfilled the highest-demand items.
-
-The final report is printed to the console as the closing output of the test run, 
-providing an at-a-glance confirmation that the system operated correctly across all 
-scenarios. A healthy final state—positive cash balance, diversified inventory, and 
-recorded sales—demonstrates that the 4-agent architecture maintained financial integrity 
-while serving customer needs throughout the complete test lifecycle.
-
----
 ## Conclusion
 
 ### How the 4-Agent Architecture Addresses Core Qualities
 
-#### Responsiveness
-
 The system achieves responsiveness through the **Manager Agent's automatic classification 
 and delegation pattern**. When a text-based request arrives, the `CodeAgent` orchestrator 
 immediately identifies intent and routes to the appropriate specialist without manual 
-intervention or multi-step user interaction. The `CodeAgent` type was specifically chosen 
-for the Manager because it can generate runtime Python code to handle conditional routing 
-and multi-agent coordination in a single reasoning pass.
+intervention or multi-step user interaction.
 
 Each sub-agent (`ToolCallingAgent`) operates with a focused toolset of 3–4 tools maximum, 
 meaning the LLM's decision space is constrained and tool selection is fast. The 
@@ -482,8 +345,6 @@ For requests that span multiple domains (e.g., "check stock and give me a quote"
 Manager coordinates sequential agent calls and combines responses—delivering a unified 
 answer in a single interaction cycle rather than requiring the customer to make separate 
 requests.
-
-#### Accuracy
 
 Accuracy is enforced through **database-grounded tool outputs** at every decision point:
 
@@ -501,8 +362,6 @@ Accuracy is enforced through **database-grounded tool outputs** at every decisio
   and `record_sale`, eliminating the risk of the LLM applying inconsistent margins across 
   interactions.
 
-#### Reliability
-
 Reliability is achieved through **multi-layered validation gates** and persistent state:
 
 - **Pre-transaction validation**: Every `restock_item` call checks cash sufficiency 
@@ -519,15 +378,3 @@ Reliability is achieved through **multi-layered validation gates** and persisten
   independently—successful items are recorded while failed items are flagged without 
   rolling back the entire order, preventing single-item failures from blocking valid 
   sales.
-
----
-### Final Assessment
-
-The implemented system fulfills all stated project requirements within the architectural 
-constraints. The 4-agent design—one orchestrator and three domain specialists—provides 
-clear separation of concerns while remaining within the 5-agent limit. Every agent 
-interaction is grounded in database state, every financial operation is validated before 
-execution, and every response is derived from authoritative catalog and transaction data 
-rather than LLM estimation. The `run_test_scenarios()` function provides end-to-end 
-validation by processing the sample dataset sequentially, tracking financial state across 
-requests, and producing a final report that confirms system integrity.
