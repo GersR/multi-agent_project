@@ -768,11 +768,23 @@ def get_catalog_pricing(item_name: str = None) -> str:
         item_name: Item name or partial name to search for. Leave empty for full catalog.
     """
     if item_name:
-        # Fuzzy match: find items containing the search term
-        matches = [
-            item for item in paper_supplies
-            if item_name.lower() in item["item_name"].lower()
-        ]
+        search_lower = item_name.lower()
+        search_words = set(search_lower.split())
+        
+        matches = []
+        for item in paper_supplies:
+            catalog_lower = item["item_name"].lower()
+            catalog_words = set(catalog_lower.split())
+            
+            # Match if:
+            # 1. Search term contains catalog name ("a4 glossy paper" contains "a4 paper"? No, but...)
+            # 2. Catalog name is a substring of search term
+            # 3. Search term is a substring of catalog name
+            # 4. Significant word overlap (at least half the catalog words appear in search)
+            if (catalog_lower in search_lower or 
+                search_lower in catalog_lower or
+                len(catalog_words & search_words) >= max(1, len(catalog_words) * 0.5)):
+                matches.append(item)
         if not matches:
             return f"No catalog items matching '{item_name}'. Item may need to be sourced externally."
         lines = [f"Catalog matches for '{item_name}':"]
@@ -1201,7 +1213,7 @@ def run_test_scenarios():
     print("Initializing Database...")
     init_database(db_engine)
     try:
-        quote_requests_sample = pd.read_csv("mini_sample.csv")
+        quote_requests_sample = pd.read_csv("quote_requests_sample.csv")
         quote_requests_sample["request_date"] = pd.to_datetime(
             quote_requests_sample["request_date"], format="%m/%d/%y", errors="coerce"
         )
