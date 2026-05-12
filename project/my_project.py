@@ -723,10 +723,10 @@ def restock_item(item_name: str, quantity: int, order_date: str) -> str:
     # Report stock for all matching items
     lines = [f"Stock check for '{item_name}' (found {len(matches)} match(es)):\n"]
     for match in matches:
-        stock_df = get_stock_level(match["item_name"], as_of_date)
+        stock_df = get_stock_level(match["item_name"], order_date)
         current_stock = int(stock_df["current_stock"].iloc[0])
         min_level = int(match["min_stock_level"])
-        needs_restock = current_stock <= min_level
+        needs_restock = current_stock > (quantity + min_level)
         
         lines.append(
             f"  Item: {match['item_name']}\n"
@@ -870,7 +870,7 @@ def calculate_quote(items_json: str, as_of_date: str, markup: float = 0.35) -> s
     quote_lines.append(f"  TOTAL QUOTE: ${total_with_markup:.2f}")
     
     if availability_issues:
-        quote_lines.append(f"\n⚠ Availability Issues:")
+        quote_lines.append(f"\nAvailability Issues:")
         for issue in availability_issues:
             quote_lines.append(f"    - {issue}")
         quote_lines.append("  → Restocking required before fulfillment.")
@@ -895,7 +895,6 @@ def record_sale(item_name: str, quantity: int, sale_date: str) -> str:
     # Verify item exists in catalog
     search_lower = item_name.lower()
     search_words = set(search_lower.split())
-    
     # Find matching items using bidirectional + word-overlap matching
     matches = []
     for _, row in inv_ref.iterrows():
@@ -911,11 +910,11 @@ def record_sale(item_name: str, quantity: int, sale_date: str) -> str:
         return f"ERROR: '{item_name}' not found in product catalog."
     
     match=matches[0]
-    catalog_mach = paper_supplies[matches[0]]
-    unit_price = catalog_match["unit_price"]
+    catalog_match = match["item_name"]
+    unit_price = match["unit_price"]
 
     # Check stock availability
-    current_stock = int(matches["current_stock"].iloc[0])
+    current_stock = int(match["current_stock"])
 
     if current_stock < quantity:
         return (
@@ -1127,7 +1126,7 @@ inventory_agent = ToolCallingAgent(
         "Manages stock levels and restocking for the paper warehouse. "
         "Use this agent to: check current inventory levels for all or specific items, "
         "identify items below their minimum stock threshold, and place restock orders "
-        "to bring stock up to 2x the minimum level. "
+        "to 2x whats left to fulfill an order or to bring stock up to 4x the minimum level. "
         "Call this agent BEFORE fulfilling orders if availability is uncertain, "
         "or AFTER a failed order due to insufficient stock. "
         "Typical triggers: 'check stock', 'do we have enough', 'restock', "
@@ -1162,13 +1161,17 @@ order_agent = ToolCallingAgent(
     model=model,
     name="order_agent",
     description=(
-        "Processes confirmed purchase orders and manages finances. "
-        "Use this agent when a customer says they want to 'place an order', "
-        "'order', 'purchase', or 'buy' items — these are confirmed sales, not quotes. "
-        "Capabilities: validate stock availability before selling, record individual "
-        "or bulk sales transactions, check cash balance, and generate financial reports. "
-        "If stock is insufficient for an item, it reports the shortage. "
-        "Do NOT use this agent for price inquiries or estimates — use quoting_agent instead."
+        "Fulfills confirmed customer orders and manages company finances. "
+        "You should use this agent after being sure there is enough inventory."
+        "Use this agent when a customer expresses purchase intent: 'I would like to place an order', "
+        "'I would like to order', 'I need to order', 'I would like to request supplies', "
+        "'please deliver', or any request with specific items AND quantities AND a delivery date. "
+        "Workflow: checks cash balance first, then fulfills the entire order as a batch using fulfill_order, "
+        "applying a 35% markup on all sales. Reports per-item success/failure and updated financials. "
+        "If an item has insufficient stock, it reports the shortage (the manager should then "
+        "delegate to inventory_agent to restock, then retry fulfillment). "
+        "Also handles standalone financial queries: 'what is our balance', 'generate a report'. "
+        "Do NOT use for price estimates or 'how much would it cost' — use quoting_agent instead."
     ),
     max_steps=10,
 )
@@ -1196,7 +1199,8 @@ manager_agent = CodeAgent(
         If a request spans multiple concerns (e.g., "quote me and also check if you have stock"), 
         call the relevant agents in sequence and combine their responses.
 
-        Always include the request date in your delegation so agents can check time-sensitive data."""),
+        Always include the request date in your delegation so agents can check time-sensitive data.
+        Do not forget to update """),
     max_steps=12,
     verbosity_level=2,  # Set to 0 in production to suppress logs
 )
