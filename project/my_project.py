@@ -985,16 +985,17 @@ def get_report(as_of_date: str) -> str:
         "",
         "Inventory Breakdown:"
     ]
-
     for item in report["inventory_summary"]:
         lines.append(
             f"  - {item['item_name']}: {item['stock']} units "
             f"(${item['value']:.2f})"
         )
-
+    
     if report["top_selling_products"]:
         lines.append("\nTop Selling Products:")
         for product in report["top_selling_products"]:
+            if not product["item_name"] or pd.isna(product["total_units"]):
+                continue
             lines.append(
                 f"  - {product['item_name']}: "
                 f"{int(product['total_units'])} units, "
@@ -1002,7 +1003,6 @@ def get_report(as_of_date: str) -> str:
             )
     else:
         lines.append("\nNo sales recorded yet.")
-
     return "\n".join(lines)
 
 @tool
