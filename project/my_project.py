@@ -652,11 +652,12 @@ def check_inventory(as_of_date: str) -> str:
     return summary
 
 @tool
-def check_item_stock(item_name: str, as_of_date: str) -> str:
+def check_item_stock(item_name: str, quantity: int, as_of_date: str) -> str:
     """Check stock level for a specific item and whether it needs restocking.
     
     Args:
         item_name: The name of the item to check stock for.
+        quantity: The quantity needed to have in stock.
         as_of_date: ISO-formatted date string (YYYY-MM-DD) to check stock as of.
     """
     # Load all inventory items for fuzzy matching
@@ -682,13 +683,56 @@ def check_item_stock(item_name: str, as_of_date: str) -> str:
     match=matches[0]
     min_level = int(match["min_stock_level"])
     current_stock = match["current_stock"]
-    needs_restock = current_stock <= min_level
-    
+    needs_restock = current_stock <= quantity + min_level
+    quantity_needed = quantity + min_level - current_stock
+    if quantity_needed <= 0:
+        return f"Item '{match['item_name']}' has sufficient stock ({current_stock} units). No restock needed."
+
+    delivery_date = get_supplier_delivery_date(order_date, quantity_needed)
+    restock_cost = quantity_needed * match["unit_price"]
+
+    # --- CHECK: Does delivery arrive by order_date? ---
+    if delivery_date > order_date:
+        return (
+            f"RESTOCK DELAYED:\n"
+            f"  Item: {match['item_name']}\n"
+            f"  Quantity Needed: {quantity_needed}\n"
+            f"  Order Date (needed by): {order_date}\n"
+            f"  Expected Delivery: {delivery_date}\n"
+            f"  → Cannot fulfill by requested date. Delivery arrives {delivery_date}."
+        )
+
+    # --- CHECK: Sufficient cash? ---
+    cash = get_cash_balance(order_date)
+    if cash < restock_cost:
+        return (
+            f"ERROR: Insufficient cash (${cash:.2f}) to cover restock cost (${restock_cost:.2f})."
+        )
+
+    # --- RECORD the restock transaction ---
+    txn_id = create_transaction(
+        item_name=match["item_name"],
+        transaction_type="stock_orders",
+        quantity=quantity_needed,
+        price=restock_cost,
+        date=delivery_date
+    )
+
+    # --- UPDATE the inventory reference table ---
+    with db_engine.connect() as conn:
+        conn.execute(
+            text("UPDATE inventory SET current_stock = :new_stock WHERE item_name = :name"),
+            {"new_stock": current_stock + quantity_needed, "name": match["item_name"]}
+        )
+        conn.commit()
+
     return (
-        f"Item: {item_name}\n"
-        f"Current Stock: {current_stock}\n"
-        f"Minimum Level: {min_level}\n"
-        f"Needs Restock: {'YES' if needs_restock else 'No'}"
+        f"RESTOCKED (Txn #{txn_id}):\n"
+        f"  Item: {match['item_name']}\n"
+        f"  Quantity Ordered: {quantity_needed}\n"
+        f"  Cost: ${restock_cost:.2f}\n"
+        f"  Expected Delivery: {delivery_date}\n"
+        f"  New Stock Level: {current_stock + quantity_needed}"
     )
 
 @tool
@@ -726,13 +770,17 @@ def restock_item(item_name: str, quantity: int, order_date: str) -> str:
         stock_df = get_stock_level(match["item_name"], order_date)
         current_stock = int(stock_df["current_stock"].iloc[0])
         min_level = int(match["min_stock_level"])
-        needs_restock = current_stock > (quantity + min_level)
-        
+        needs_restock = current_stock < (quantity + min_level)
+        quantity_needed = (quantity + min_level) - current_stock
+        delivery_date=get_supplier_delivery_date(order_date, quantity_needed)
+
         lines.append(
             f"  Item: {match['item_name']}\n"
             f"  Current Stock: {current_stock}\n"
             f"  Minimum Level: {min_level}\n"
             f"  Needs Restock: {'YES' if needs_restock else 'No'}\n"
+            f"  Restock Needed: {quantity_needed if needs_restock else 0}\n"
+            f"  Expected Delivery Date: {delivery_date}"
         )
     
     return "\n".join(lines)
@@ -749,10 +797,12 @@ def search_past_quotes(search_terms: str, limit: int = 5) -> str:
         limit: Maximum number of results to return. Defaults to 5.
     """  
     terms_list = [t.strip() for t in search_terms.split(",") if t.strip()]
-    results = search_quote_history(terms_list, limit=limit)  
     
+    results = search_quote_history(terms_list, limit=limit)  
+    print(f"Results: {results}")
+
     if not results:
-        return f"No historical quotes found matching: {', '.join(search_terms)}"
+        return f"No historical quotes found matching: {', '.join(terms_list)}"
     
     lines = [f"Found {len(results)} matching historical quote(s):\n"]
     for i, quote in enumerate(results, 1):
@@ -935,13 +985,21 @@ def record_sale(item_name: str, quantity: int, sale_date: str) -> str:
         price=sale_price,
         date=sale_date
     )
+    # Update inventory
+    new_stock = current_stock - quantity
+    with db_engine.connect() as conn:
+        conn.execute(
+            text("UPDATE inventory SET current_stock = :new_stock WHERE item_name = :name"),
+            {"new_stock": new_stock, "name": catalog_match}
+        )
+        conn.commit()
 
     return (
         f"Sale recorded (Txn #{txn_id}):\n"
         f"Item: {item_name}\n"
         f"Quantity: {quantity} units\n"
         f"Revenue: ${sale_price:.2f}\n"
-        f"Remaining Stock: {current_stock - quantity} units"
+        f"Remaining Stock: {new_stock} units"
     )
 
 @tool
@@ -1142,8 +1200,7 @@ inventory_agent = ToolCallingAgent(
         "- When asked for a full inventory scan: use `check_inventory`.\n"
         "- When restocking is needed: use `restock_item` with the appropriate quantity.\n\n"
         "RESTOCKING RULES:\n"
-        "- If restocking to fulfill a specific order: restock to the quantity requested by the customer plus minimum threshold.\n"
-        "- If restocking because stock is below the minimum threshold (no specific order): restock to 4x the min_stock_level.\n"
+        "- Fulfill to restock needed\n"
         "- Always confirm the restock was recorded before reporting success.\n\n"
         "RESPONSE FORMAT:\n"
         "- Always report: item name, current stock, minimum level, and whether restocking was performed.\n"
