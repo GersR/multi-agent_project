@@ -685,64 +685,24 @@ def check_item_stock(item_name: str, quantity: int, as_of_date: str) -> str:
     current_stock = match["current_stock"]
     needs_restock = current_stock <= quantity + min_level
     quantity_needed = quantity + min_level - current_stock
-    if quantity_needed <= 0:
-        return f"Item '{match['item_name']}' has sufficient stock ({current_stock} units). No restock needed."
-
-    delivery_date = get_supplier_delivery_date(order_date, quantity_needed)
-    restock_cost = quantity_needed * match["unit_price"]
-
-    # --- CHECK: Does delivery arrive by order_date? ---
-    if delivery_date > order_date:
-        return (
-            f"RESTOCK DELAYED:\n"
-            f"  Item: {match['item_name']}\n"
-            f"  Quantity Needed: {quantity_needed}\n"
-            f"  Order Date (needed by): {order_date}\n"
-            f"  Expected Delivery: {delivery_date}\n"
-            f"  → Cannot fulfill by requested date. Delivery arrives {delivery_date}."
-        )
-
-    # --- CHECK: Sufficient cash? ---
-    cash = get_cash_balance(order_date)
-    if cash < restock_cost:
-        return (
-            f"ERROR: Insufficient cash (${cash:.2f}) to cover restock cost (${restock_cost:.2f})."
-        )
-
-    # --- RECORD the restock transaction ---
-    txn_id = create_transaction(
-        item_name=match["item_name"],
-        transaction_type="stock_orders",
-        quantity=quantity_needed,
-        price=restock_cost,
-        date=delivery_date
-    )
-
-    # --- UPDATE the inventory reference table ---
-    with db_engine.connect() as conn:
-        conn.execute(
-            text("UPDATE inventory SET current_stock = :new_stock WHERE item_name = :name"),
-            {"new_stock": current_stock + quantity_needed, "name": match["item_name"]}
-        )
-        conn.commit()
-
+    
     return (
-        f"RESTOCKED (Txn #{txn_id}):\n"
-        f"  Item: {match['item_name']}\n"
-        f"  Quantity Ordered: {quantity_needed}\n"
-        f"  Cost: ${restock_cost:.2f}\n"
-        f"  Expected Delivery: {delivery_date}\n"
-        f"  New Stock Level: {current_stock + quantity_needed}"
+        f"Item: {item_name}\n"
+        f"Current Stock: {current_stock}\n"
+        f"Minimum Level: {min_level}\n"
+        f"Needs Restock: {'YES' if needs_restock else 'No'}\n"
+        f"Restock Needed: {quantity_needed if needs_restock else 0}"
     )
 
 @tool
-def restock_item(item_name: str, quantity: int, order_date: str) -> str:
+def restock_item(item_name: str, quantity: int, request_date: str, delivery_date: str) -> str:
     """Restock an item by placing a stock order. Validates cash availability, records the transaction, and returns the estimated delivery date.
     
     Args:
         item_name: The name of the item to restock.
         quantity: Number of units to order.
-        order_date: ISO-formatted date string (YYYY-MM-DD) for the order.
+        request_date: ISO-formatted date string (YYYY-MM-DD) for the order request.
+        delivery_date: ISO-formatted date string (YYYY-MM-DD) for the order delivery.
     """
     # Load all inventory items for fuzzy matching
     inv_ref = pd.read_sql("SELECT * FROM inventory", db_engine)
@@ -764,26 +724,63 @@ def restock_item(item_name: str, quantity: int, order_date: str) -> str:
     if not matches:
         return f"'{item_name}' is not currently in our inventory catalog."
     
-    # Report stock for all matching items
-    lines = [f"Stock check for '{item_name}' (found {len(matches)} match(es)):\n"]
-    for match in matches:
-        stock_df = get_stock_level(match["item_name"], order_date)
-        current_stock = int(stock_df["current_stock"].iloc[0])
-        min_level = int(match["min_stock_level"])
-        needs_restock = current_stock < (quantity + min_level)
-        quantity_needed = (quantity + min_level) - current_stock
-        delivery_date=get_supplier_delivery_date(order_date, quantity_needed)
+    match=matches[0]
+    min_level = int(match["min_stock_level"])
+    current_stock = match["current_stock"]
+    needs_restock = current_stock <= quantity + min_level
+    quantity_needed = quantity + min_level - current_stock
+    if quantity_needed <= 0:
+        return f"Item '{match['item_name']}' has sufficient stock ({current_stock} units). No restock needed."
 
-        lines.append(
+    restock_date = get_supplier_delivery_date(request_date, quantity_needed)
+    restock_cost = quantity_needed * match["unit_price"]
+
+    # --- CHECK: Does delivery arrive by order_date? ---
+    if restock_date > delivery_date:
+        return (
+            f"RESTOCK DELAYED:\n"
             f"  Item: {match['item_name']}\n"
-            f"  Current Stock: {current_stock}\n"
-            f"  Minimum Level: {min_level}\n"
-            f"  Needs Restock: {'YES' if needs_restock else 'No'}\n"
-            f"  Restock Needed: {quantity_needed if needs_restock else 0}\n"
-            f"  Expected Delivery Date: {delivery_date}"
+            f"  Quantity Needed: {quantity_needed}\n"
+            f"  Request Date: {request_date}\n"
+            f"  Expected Delivery: {delivery_date}\n"
+            f"  → Cannot fulfill by requested date. Restock delivery arrives {restock_date}."
         )
-    
-    return "\n".join(lines)
+
+    # --- CHECK: Sufficient cash? ---
+    cash = get_cash_balance(request_date)
+    if cash < restock_cost:
+        return (
+            f"ERROR: Insufficient cash (${cash:.2f}) to cover restock cost (${restock_cost:.2f})."
+        )
+
+    # --- RECORD the restock transaction ---
+    txn_id = create_transaction(
+        item_name=match["item_name"],
+        transaction_type="stock_orders",
+        quantity=quantity_needed,
+        price=restock_cost,
+        date=restock_date
+    )
+
+    # --- UPDATE the inventory reference table ---
+    new_stock=current_stock + quantity_needed
+    with db_engine.connect() as conn:
+        conn.execute(
+            text("UPDATE inventory SET current_stock = :new_stock WHERE item_name = :name"),
+            {"new_stock": new_stock, "name": match["item_name"]}
+        )
+        conn.commit()
+
+    return (
+        f"RESTOCKED (Txn #{txn_id}):\n"
+        f"  Item: {match['item_name']}\n"
+        f"  Quantity Ordered: {quantity_needed}\n"
+        f"  Cost: ${restock_cost:.2f}\n"
+        f"  Request Date: {request_date}\n"
+        f"  Expected Delivery: {delivery_date}\n"
+        f"  Expected Restock Delivery: {restock_date}\n"
+        f"  New Stock Level: {new_stock}"
+    )
 
 #############################
 # Tools for quoting agent   #
@@ -979,7 +976,7 @@ def record_sale(item_name: str, quantity: int, sale_date: str) -> str:
 
     # Record the sale
     txn_id = create_transaction(
-        item_name=item_name,
+        item_name=catalog_name,
         transaction_type="sales",
         quantity=quantity,
         price=sale_price,
