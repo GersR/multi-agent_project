@@ -150,18 +150,6 @@ Executes a purchase decision with the following safeguards:
 5. **Delivery estimation**: Calls `get_supplier_delivery_date()` to provide an 
    expected arrival date based on order size
 
-#### Auto-Restock Strategy (2× Minimum)
-
-The restocking logic is governed by the Inventory Agent's system prompt and the 
-`handle_inventory()` helper function, which instructs the agent:
-
-> "If any are below minimum, restock them to 2x their minimum level."
-
-This strategy ensures:
-- A buffer above the minimum threshold to prevent immediate re-triggers
-- Proportional ordering (items with higher minimums get larger orders)
-- Financial discipline (each order is validated against cash balance before execution)
-
 ---
 
 ### B. Intelligent Quoting
@@ -187,10 +175,10 @@ competitive pricing.
 #### `get_catalog_pricing(item_name)`
 
 Provides authoritative base pricing by:
-1. Matching against the full `paper_supplies` catalog (46 items)
+1. Matching against the inventory
 2. Matching any item whose name contains the search term or if it is a substring (case-insensitive)
 3. Returning item name, category, and unit price for all matches
-4. If no `item_name` is provided, returning the complete catalog
+4. If no `item_name` clearly stating the absence of the item.
 
 This ensures quotes are always grounded in actual product costs rather than 
 hallucinated prices.
@@ -199,8 +187,7 @@ hallucinated prices.
 
 Produces a formal quote document by:
 1. Parsing a JSON array of `{item_name, quantity}` objects
-2. Looking up each item's `unit_price` from `paper_supplies` (exact match, 
-   case-insensitive)
+2. Looking up each item's `unit_price` from inventory
 3. Computing line-item costs: `quantity × unit_price`
 4. Checking real-time stock availability via `get_all_inventory(as_of_date)`
 5. Applying a configurable markup (default **35%**) to the subtotal
@@ -208,7 +195,6 @@ Produces a formal quote document by:
 
 The output is a formatted quote with:
 - Individual line items with unit price, quantity, and extended cost
-- Stock status per item (`In Stock` or `LOW` with available quantity)
 - Subtotal, markup amount, and final quoted total
 - An availability warnings section if restocking is required before fulfillment
 
