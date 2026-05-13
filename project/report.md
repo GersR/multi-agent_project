@@ -30,7 +30,7 @@ ToolCallingAgents:
 
 ### Validation
 
-The solution was verified against a set of sample customer requests (`mini_sample.csv`), 
+The solution was verified against a set of sample customer requests (`quote_requests_sample.csv`), 
 processing each sequentially while tracking cash balance and inventory value across the 
 full scenario lifecycle. Results are persisted to `test_results.csv` with a final 
 financial health report confirming system integrity.
@@ -67,7 +67,7 @@ As a `ToolCallingAgent`, it is equipped with the following tools:
 | --- | --- |
 | `check_inventory` | Queries the full inventory table and flags items below minimum stock thresholds |
 | `check_item_stock` | Looks up stock levels for a specific item by name |
-| `restock_item` | Initiates a purchase order to replenish an item to 2× its minimum stock level |
+| `restock_item` | Initiates a purchase order to replenish an item to a correct stock level |
 
 The agent accesses the `inventory` table in SQLite, which tracks `current_stock` and 
 `min_stock_level` for each of the ~37 items (80% coverage of the 46-item catalog). 

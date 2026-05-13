@@ -957,7 +957,7 @@ def record_sale(item_name: str, quantity: int, sale_date: str) -> str:
         return f"ERROR: '{item_name}' not found in product catalog."
     
     match=matches[0]
-    catalog_match = match["item_name"]
+    catalog_name = match["item_name"]
     unit_price = match["unit_price"]
 
     # Check stock availability
@@ -987,7 +987,7 @@ def record_sale(item_name: str, quantity: int, sale_date: str) -> str:
     with db_engine.connect() as conn:
         conn.execute(
             text("UPDATE inventory SET current_stock = :new_stock WHERE item_name = :name"),
-            {"new_stock": new_stock, "name": catalog_match}
+            {"new_stock": new_stock, "name": catalog_name}
         )
         conn.commit()
 
